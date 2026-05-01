@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 from fastapi import FastAPI, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from PIL import Image
+from PIL import Image, ImageOps
 from torchvision import transforms
 from torchvision.models import squeezenet1_1, SqueezeNet1_1_Weights
 
@@ -110,7 +110,9 @@ async def predict(image: UploadFile):
         raise HTTPException(413, "Imagen demasiado grande (max 5 MB)")
 
     try:
-        img = Image.open(io.BytesIO(contents)).convert("RGB")
+        img = Image.open(io.BytesIO(contents))
+        img = ImageOps.exif_transpose(img)
+        img = img.convert("RGB")
     except Exception:
         raise HTTPException(400, "No se pudo procesar la imagen")
 
