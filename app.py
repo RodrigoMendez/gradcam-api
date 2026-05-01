@@ -116,13 +116,18 @@ async def predict(image: UploadFile):
         img = img.convert("RGB")
     except Exception:
         raise HTTPException(400, "No se pudo procesar la imagen")
+    del contents
 
-    # Prepare image for display (227x227 RGB normalized to 0-1)
-    img_resized = img.resize((227, 227))
-    rgb_img = np.array(img_resized).astype(np.float32) / 255.0
+    # Resize early to save memory (phone photos can be 12MP+)
+    img = img.resize((227, 227), Image.LANCZOS)
+    rgb_img = np.array(img).astype(np.float32) / 255.0
 
     # Preprocess for model
-    input_tensor = preprocess(img).unsqueeze(0)
+    normalize = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+    input_tensor = normalize(img).unsqueeze(0)
 
     # Forward pass — top 5 predictions
     with torch.no_grad():
@@ -137,7 +142,7 @@ async def predict(image: UploadFile):
 
     # Grad-CAM (needs gradients, so separate from the no_grad block)
     top1_idx = top5_indices[0].item()
-    input_cam = preprocess(img).unsqueeze(0)
+    input_cam = normalize(img).unsqueeze(0)
     cam = compute_gradcam(input_cam, top1_idx)
 
     # Create overlay
