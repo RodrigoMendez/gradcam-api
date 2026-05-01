@@ -46,36 +46,37 @@ def compute_gradcam(input_tensor, class_idx):
     gradients = []
 
     def forward_hook(module, inp, out):
-        activations.append(out)
+        activations.append(out.detach())
 
     def backward_hook(module, grad_in, grad_out):
-        gradients.append(grad_out[0])
+        gradients.append(grad_out[0].detach())
 
     fh = target_layer.register_forward_hook(forward_hook)
     bh = target_layer.register_full_backward_hook(backward_hook)
 
-    input_tensor.requires_grad_(True)
-    output = model(input_tensor)
-    model.zero_grad()
-    output[0, class_idx].backward()
+    try:
+        inp = input_tensor.clone().requires_grad_(True)
+        output = model(inp)
+        model.zero_grad()
+        output[0, class_idx].backward()
 
-    fh.remove()
-    bh.remove()
+        act = activations[0]
+        grad = gradients[0]
 
-    act = activations[0].detach()
-    grad = gradients[0].detach()
+        # Global average pooling of gradients -> channel weights
+        w = grad.mean(dim=(2, 3), keepdim=True)
+        # Weighted combination of activation maps
+        cam = (w * act).sum(dim=1, keepdim=True)
+        cam = F.relu(cam)
+        # Normalize to 0-1
+        cam = cam.squeeze()
+        if cam.max() > 0:
+            cam = cam / cam.max()
 
-    # Global average pooling of gradients -> channel weights
-    weights = grad.mean(dim=(2, 3), keepdim=True)
-    # Weighted combination of activation maps
-    cam = (weights * act).sum(dim=1, keepdim=True)
-    cam = F.relu(cam)
-    # Normalize to 0-1
-    cam = cam.squeeze()
-    if cam.max() > 0:
-        cam = cam / cam.max()
-
-    return cam.numpy()
+        return cam.numpy()
+    finally:
+        fh.remove()
+        bh.remove()
 
 
 def apply_heatmap(rgb_img, cam, alpha=0.5):
