@@ -10,9 +10,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 from torchvision import transforms
 from torchvision.models import squeezenet1_1, SqueezeNet1_1_Weights
-from pytorch_grad_cam import GradCAM
-from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
-from pytorch_grad_cam.utils.image import show_cam_on_image
 
 app = FastAPI()
 
@@ -39,8 +36,63 @@ preprocess = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
 
-# GradCAM setup — last Fire module's expand3x3 conv
-target_layers = [model.features[-1]]
+# Target layer for Grad-CAM — last Fire module
+target_layer = model.features[-1]
+
+
+def compute_gradcam(input_tensor, class_idx):
+    """Compute Grad-CAM heatmap using PyTorch hooks."""
+    activations = []
+    gradients = []
+
+    def forward_hook(module, inp, out):
+        activations.append(out)
+
+    def backward_hook(module, grad_in, grad_out):
+        gradients.append(grad_out[0])
+
+    fh = target_layer.register_forward_hook(forward_hook)
+    bh = target_layer.register_full_backward_hook(backward_hook)
+
+    input_tensor.requires_grad_(True)
+    output = model(input_tensor)
+    model.zero_grad()
+    output[0, class_idx].backward()
+
+    fh.remove()
+    bh.remove()
+
+    act = activations[0].detach()
+    grad = gradients[0].detach()
+
+    # Global average pooling of gradients -> channel weights
+    weights = grad.mean(dim=(2, 3), keepdim=True)
+    # Weighted combination of activation maps
+    cam = (weights * act).sum(dim=1, keepdim=True)
+    cam = F.relu(cam)
+    # Normalize to 0-1
+    cam = cam.squeeze()
+    if cam.max() > 0:
+        cam = cam / cam.max()
+
+    return cam.numpy()
+
+
+def apply_heatmap(rgb_img, cam, alpha=0.5):
+    """Overlay jet colormap heatmap on RGB image (both as numpy arrays)."""
+    # Resize cam to image size
+    h, w = rgb_img.shape[:2]
+    cam_resized = np.array(Image.fromarray((cam * 255).astype(np.uint8)).resize((w, h))) / 255.0
+
+    # Create jet colormap manually
+    heatmap = np.zeros((h, w, 3), dtype=np.float32)
+    # Blue to cyan to green to yellow to red
+    heatmap[:, :, 0] = np.clip(1.5 - abs(cam_resized * 4 - 3), 0, 1)  # R
+    heatmap[:, :, 1] = np.clip(1.5 - abs(cam_resized * 4 - 2), 0, 1)  # G
+    heatmap[:, :, 2] = np.clip(1.5 - abs(cam_resized * 4 - 1), 0, 1)  # B
+
+    overlay = rgb_img * (1 - alpha) + heatmap * alpha
+    return (np.clip(overlay, 0, 1) * 255).astype(np.uint8)
 
 
 @app.get("/health")
@@ -80,11 +132,13 @@ async def predict(image: UploadFile):
         for score, idx in zip(top5_scores, top5_indices)
     ]
 
-    # Grad-CAM
+    # Grad-CAM (needs gradients, so separate from the no_grad block)
     top1_idx = top5_indices[0].item()
-    cam = GradCAM(model=model, target_layers=target_layers)
-    grayscale_cam = cam(input_tensor=input_tensor, targets=[ClassifierOutputTarget(top1_idx)])[0]
-    overlay = show_cam_on_image(rgb_img, grayscale_cam, use_rgb=True)
+    input_cam = preprocess(img).unsqueeze(0)
+    cam = compute_gradcam(input_cam, top1_idx)
+
+    # Create overlay
+    overlay = apply_heatmap(rgb_img, cam)
 
     # Encode overlay as base64 PNG
     overlay_pil = Image.fromarray(overlay)
