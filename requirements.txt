@@ -2,8 +2,8 @@
 fastapi
 uvicorn[standard]
 python-multipart
-torch+cpu
-torchvision+cpu
+torch
+torchvision
 pytorch-grad-cam
 Pillow
 numpy
